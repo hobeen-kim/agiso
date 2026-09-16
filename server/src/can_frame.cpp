@@ -6,7 +6,7 @@
 
 void validate_frame(const CanFrame& frame)
 {
-  swtich (frame.format) {
+  switch (frame.format) {
     case CanIdFormat::Standard11:
       if (frame.can_id > CAN_STANDARD_ID_MAX) {
         throw std::invalid_argument("Standard CAN ID exceeds 11 bits");

@@ -17,77 +17,7 @@
 #include <unistd.h>
 
 #include "can_frame.hpp"
-
-struct IsobusId {
-  std::uint8_t priority; //우선순위
-  std::uint32_t pgn; //parameter group number, 메시지 종류
-  std::uint8_t source; // 출발지
-  std::optional<std::uint8_t> destination; //목적지
-};
-
-// Priority	3	메시지 우선순위. 0이 최고, 7이 최저
-// EDP	1	Extended Data Page. J1939에서는 보통 0
-// DP	1	Data Page. PGN 공간을 두 배로 확장
-// PF	8	PDU Format. 메시지 유형 결정 (PDU1 vs PDU2 구분)
-// PS	8	PDU Specific. PF < 240이면 목적지 주소, PF >= 240이면 그룹 확장
-// SA	8	Source Address. 메시지를 보내는 노드의 주소 (0x00~0xFD)
-IsobusId decode_id(std::uint32_t can_id)
-{
-  if (can_id > CAN_ID_MAX) {
-    throw std::invalid_argument("CAN ID exceeds 29 bits");
-  }
-
-  const auto priority = static_cast<std::uint8_t>((can_id >> 26) & 0x07);
-  
-  const auto pf = static_cast<std::uint8_t>((can_id >> 16) & 0xFF); //PDU Format의 약자로, 메시지 형식을 구분하는 8비트 값. PGN의 일부로서 메시지 종류를 구분
-
-  const auto ps = static_cast<std::uint8_t>((can_id >> 8) & 0xFF);
-
-  const auto source = static_cast<std::uint8_t>(can_id & 0xFF);
-
-  auto pgn = (can_id >> 8) & 0x3FFFF;
-  std::optional<std::uint8_t> destination;
-
-  if(pf < 240) { //PDU1 이라면
-    pgn &= 0x3FF00; // 하위 8비트를 자르고
-    destination = ps; //ps 를 목적지로 한다.
-  }
-
-  return {priority, pgn, source, destination};
-}
-
-std::uint32_t encode_id(const IsobusId& id)
-{
-  if (id.priority > 7) {
-    throw std::invalid_argument("Priority must be 0..7");
-  }
-
-  if(id.pgn > 0x3FFFF) {
-    throw std::invalid_argument("PGN exceeds 18 bits");
-  }
-
-  const auto pf = (id.pgn >> 8) & 0xFF;
-
-  std::uint32_t can_id = 
-    (static_cast<std::uint32_t>(id.priority) << 26) |
-    (id.pgn << 8) |
-    id.source;
-
-  if (pf < 240) {
-    if((id.pgn & 0xFF) != 0) {
-      throw std::invalid_argument("PDU1 PGN must have its low byte cleared");
-    }
-    if(!id.destination.has_value()) {
-      throw std::invalid_argument("PDU1 requires a destination; use 0xFF for global");
-    }
-
-    can_id |= static_cast<std::uint32_t>(*id.destination) << 8;
-  } else if (id.destination.has_value()) {
-    throw std::invalid_argument("PDU2 has no separate destination field");
-  }
-
-  return can_id;
-}
+#include "isobus_id.hpp"
 
 // 호출 전에 프레임 종류와 데이터 길이를 검사한 SocketCAN 프레임을 변환합니다.
 CanFrame to_can_frame(const can_frame& raw, std::uint64_t timestamp_us)

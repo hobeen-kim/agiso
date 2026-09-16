@@ -8,7 +8,7 @@ struct IsobusId {
   std::uint32_t pgn;
   std::uint8_t source;
   std::optional<std::uint8_t> destination;
-}
+};
 
 IsobusId decode_id(std::uint32_t can_id);
 

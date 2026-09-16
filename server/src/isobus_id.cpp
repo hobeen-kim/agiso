@@ -10,9 +10,9 @@ IsobusId decode_id(std::uint32_t can_id)
   }
 
   const auto priority = static_cast<std::uint8_t>((can_id >> 26) & 0x07);
-  const auto pf = static_cast<std::uint8_t>((cand_id >> 16) & 0xFF);
-  const auto ps = static_cast<std::uint8_t>((cand_id >> 8) & 0xFF);
-  const auto source = static_cast<std::uint8_t>(cand_id & 0xFF);
+  const auto pf = static_cast<std::uint8_t>((can_id >> 16) & 0xFF);
+  const auto ps = static_cast<std::uint8_t>((can_id >> 8) & 0xFF);
+  const auto source = static_cast<std::uint8_t>(can_id & 0xFF);
 
   auto pgn = (can_id >> 8) & 0x3FFFF;
   std::optional<std::uint8_t> destination;
