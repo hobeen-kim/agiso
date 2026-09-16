@@ -18,68 +18,11 @@
 
 #include "can_frame.hpp"
 #include "isobus_id.hpp"
+#include "socketcan.hpp"
 
-// 호출 전에 프레임 종류와 데이터 길이를 검사한 SocketCAN 프레임을 변환합니다.
-CanFrame to_can_frame(const can_frame& raw, std::uint64_t timestamp_us)
-{
-  const bool extended = (raw.can_id & CAN_EFF_FLAG) != 0;
-
-  CanFrame frame{};
-  frame.format = extended ? CanIdFormat::Extended29 : CanIdFormat::Standard11;
-  // SocketCAN 플래그를 제거하고 순수 ID만 저장
-  frame.can_id = raw.can_id & (extended ? CAN_EFF_MASK : CAN_SFF_MASK);
-  frame.length = raw.len;
-
-  for (unsigned i = 0; i < frame.length; ++i) {
-    frame.data[i] = raw.data[i];
-  }
-
-  frame.timestamp_us = timestamp_us;
-  return frame;
-}
-
-can_frame to_socketcan_frame(const CanFrame& frame)
-{
-  validate_frame(frame);
-
-  can_frame raw{};
-  raw.can_id = frame.can_id;
-
-  if (frame.format == CanIdFormat::Extended29) {
-    raw.can_id |= CAN_EFF_FLAG;
-  }
-
-  raw.len = frame.length;
-
-  for (unsigned i = 0; i < frame.length; ++i) {
-    raw.data[i] = frame.data[i];
-  }
-
-  return raw;
-}
-
-bool send_frame(int socket_fd, const CanFrame& frame)
-{
-  const auto raw = to_socketcan_frame(frame);
-
-  ssize_t sent;
-
-  do {
-    sent = write(socket_fd, &raw, sizeof(raw));
-  } while (sent < 0 && errno == EINTR);
-
-  if (sent < 0) {
-    std::perror("write");
-    return false;
-  }
-
-  if (sent != static_cast<ssize_t>(sizeof(raw))) {
-    std::cerr << "Incomplete CAN frame write\n";
-    return false;
-  }
-
-  return true;
-}
+#include "address_claim.hpp"
+#include "isobus_name.hpp"
+#include <poll.h>
 
 int main()
 {
@@ -117,37 +60,34 @@ int main()
     }
 
   try {
-    CanFrame standard{};
-    standard.format = CanIdFormat::Standard11;
-    standard.can_id = 0x123;
-    standard.length = 4;
-    standard.data = {0x11, 0x22, 0x33, 0x44};
 
-    if (!send_frame(socket_fd, standard)) {
+    IsobusName my_name{};
+    my_name.identity_number = 1;
+    my_name.manufacturer_code = 0;  // 실험·개발용
+    my_name.ecu_instance = 0;
+    my_name.function_instance = 0;
+    my_name.function_code = 29;     // VT
+    my_name.device_class = 0;
+    my_name.device_class_instance = 0;
+    my_name.industry_group = 2;     // 농업·임업
+    my_name.arbitrary_address_capable = false;
+
+    // 사용하려는 송신 주소
+    constexpr std::uint8_t preferred_address = 0x80;
+
+    // Address Claim 프레임 생성
+    const CanFrame claim = make_address_claim(my_name, preferred_address);
+
+    if (!send_frame(socket_fd, claim)) {
         close(socket_fd);
         return 1;
     }
 
-    IsobusId id{};
-    id.priority = 6;
-    id.pgn = 0xEA00;
-    id.source = 0x80;
-    id.destination = 0x23;
+    std::cout << "TX Address Claim: ";
+    print_frame(claim);
 
-    CanFrame extended{};
-    extended.format = CanIdFormat::Extended29;
-    extended.can_id = encode_id(id);
-    extended.length = 3;
-    extended.data = {0x00, 0xEE, 0x00};
-
-    if (!send_frame(socket_fd, extended)) {
-        close(socket_fd);
-        return 1;
-    }
-
-    std::cout << "Sent 2 test frames\n";
   } catch (const std::exception& error) {
-      std::cerr << "Send failed: " << error.what() << '\n';
+      std::cerr << "Address Claim send failed: " << error.what() << '\n';
       close(socket_fd);
       return 1;
   }
@@ -159,8 +99,76 @@ int main()
 
   const auto started_at = std::chrono::steady_clock::now();
 
+  //시험용 송신 주기: 1초
+  const auto send_interval = std::chrono::milliseconds(1000);
+
+  //첫 송신 예정 시각
+  auto next_send_at = started_at + send_interval;
+
+  //송신횟수를 구분할 값 (0~255)
+  std::uint8_t counter = 0;
+
+  //주기적으로 보낼 시험용 프레임
+  CanFrame periodic_frame{};
+  periodic_frame.format = CanIdFormat::Standard11;
+  periodic_frame.can_id = 0x321;
+  periodic_frame.length = 1;
+
   // 계속 수신
   while (true) {
+
+    //매 반복마다 현재시간 확인
+    const auto now = std::chrono::steady_clock::now();
+
+    if(now >= next_send_at) {
+      periodic_frame.data[0] = counter;
+
+      if(!send_frame(socket_fd, periodic_frame)) {
+        close(socket_fd);
+        return 1;
+      }
+
+      std::cout << "TX ";
+      print_frame(periodic_frame);
+
+      ++counter;
+      next_send_at = now + send_interval;
+    }
+
+    pollfd event{};
+    event.fd = socket_fd;
+    event.events = POLLIN;
+
+    // 읽을 메시지가 있거나 100ms 지나면 반환
+    const int ready = poll(&event, 1, 100);
+
+    if (ready < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+
+      std::perror("poll");
+      close(socket_fd);
+      return 1;
+    }
+
+    //수신된 메시지 없음
+    if (ready == 0) {
+      continue;
+    }
+
+    // 소켓 오류나 연결 종료 상태 확인
+     if (event.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+         std::cerr << "CAN socket error or hangup\n";
+         close(socket_fd);
+         return 1;
+     }
+
+     // 읽을 데이터가 있을 때만 아래 read() 실행
+     if (!(event.revents & POLLIN)) {
+         continue;
+     }
+
     can_frame raw{}; //linux socketcan 이 사용하는 구조체.
 
     const auto received = read(socket_fd, &raw, sizeof(raw));
@@ -231,6 +239,35 @@ int main()
       }
 
       std::cout << std::dec << std::flush;
+
+      const auto received_name = parse_address_claim(frame);
+
+      if (received_name.has_value()) {
+        if (received_name.has_value()) {
+          if (id.source == 0xFE) {
+            std::cout << " Cannot Claim Address received\n";
+          } else {
+            std::cout << " Address Claim received\n";
+          }
+
+           std::cout
+              << "  identity_number   = "
+              << received_name->identity_number << '\n'
+
+              << "  manufacturer_code = "
+              << received_name->manufacturer_code << '\n'
+
+              << "  function_code     = "
+              << static_cast<unsigned>(received_name->function_code)
+              << '\n'
+
+              << "  industry_group    = "
+              << static_cast<unsigned>(received_name->industry_group)
+              << '\n'
+
+              << std::flush;
+        }
+      }
     }
   }
 }
